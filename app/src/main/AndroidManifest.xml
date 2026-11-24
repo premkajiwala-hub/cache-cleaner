@@ -12,7 +12,8 @@
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
 
-    <!-- No INTERNET permission: this app never talks to the network. -->
+    <!-- Only used to check GitHub for a newer release on launch. No other network use. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"

@@ -8,6 +8,8 @@ import com.cachecleaner.app.data.CleanupRecord
 import com.cachecleaner.app.data.DeviceStorage
 import com.cachecleaner.app.data.HistoryStore
 import com.cachecleaner.app.data.StorageRepository
+import com.cachecleaner.app.data.UpdateChecker
+import com.cachecleaner.app.data.UpdateInfo
 import com.cachecleaner.app.shizuku.ShizukuManager
 import com.cachecleaner.app.shizuku.ShizukuStatus
 import kotlinx.coroutines.Dispatchers
@@ -33,6 +35,9 @@ data class UiState(
     val storage: DeviceStorage? = null,
     val clearing: Boolean = false,
     val lastResult: CleanResult? = null,
+    /** Set right after a successful clean; the UI plays the celebration, then clears it. */
+    val celebrate: CleanResult? = null,
+    val update: UpdateInfo? = null,
     val error: String? = null,
     val history: List<CleanupRecord> = emptyList(),
 ) {
@@ -63,6 +68,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         Shizuku.addRequestPermissionResultListener(permissionResult)
         refreshStatus()
         scan()
+        checkForUpdate()
+    }
+
+    private fun checkForUpdate() {
+        viewModelScope.launch {
+            val update = withContext(Dispatchers.IO) {
+                try {
+                    UpdateChecker.check(BuildConfig.VERSION_NAME)
+                } catch (e: Exception) {
+                    null // offline or GitHub unreachable: just don't show the link
+                }
+            }
+            _state.update { it.copy(update = update) }
+        }
+    }
+
+    fun dismissUpdate() {
+        _state.update { it.copy(update = null) }
+    }
+
+    fun celebrationShown() {
+        _state.update { it.copy(celebrate = null) }
     }
 
     override fun onCleared() {
@@ -112,7 +139,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!_state.value.canClear) return
         viewModelScope.launch {
             scanJob?.join()
-            _state.update { it.copy(clearing = true, error = null, lastResult = null) }
+            _state.update { it.copy(clearing = true, error = null, lastResult = null, celebrate = null) }
             try {
                 val outcome = withContext(Dispatchers.IO) {
                     val before = repo.scanApps().associate { it.packageName to it.cacheBytes }
@@ -145,6 +172,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         apps = apps,
                         storage = storage,
                         lastResult = result,
+                        celebrate = result.takeIf { r -> r.freedBytes > 0 },
                         history = history,
                     )
                 }
@@ -156,7 +184,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dismissMessages() {
-        _state.update { it.copy(lastResult = null, error = null) }
+        _state.update { it.copy(lastResult = null, error = null, celebrate = null) }
     }
 
     fun clearHistory() {

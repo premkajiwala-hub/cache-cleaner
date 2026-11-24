@@ -1,6 +1,25 @@
 package com.cachecleaner.app.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.EaseInOutCubic
+import androidx.compose.animation.core.EaseOutCubic
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -29,6 +48,16 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -39,6 +68,7 @@ import com.cachecleaner.app.UiState
 import com.cachecleaner.app.data.AppEntry
 import com.cachecleaner.app.shizuku.ShizukuManager
 import com.cachecleaner.app.shizuku.ShizukuStatus
+import kotlinx.coroutines.launch
 
 private const val DATA_HOG_THRESHOLD = 1_000_000_000L // 1 GB
 
@@ -70,18 +100,25 @@ fun OverviewScreen(
         state.error?.let { msg ->
             item { MessageCard(msg, isError = true, onDismiss = onDismissMessage) }
         }
-        state.lastResult?.let { result ->
-            item {
-                val context = LocalContext.current
-                MessageCard(
-                    text = if (result.freedBytes > 0) {
-                        "Freed ${context.formatSize(result.freedBytes)} from ${result.appsCleaned} apps"
-                    } else {
-                        "Caches were already empty — nothing to free"
-                    },
-                    isError = false,
-                    onDismiss = onDismissMessage,
-                )
+        item {
+            val result = state.lastResult
+            AnimatedVisibility(
+                visible = result != null && state.celebrate == null,
+                enter = expandVertically(tween(350)) + fadeIn(tween(350)),
+                exit = shrinkVertically() + fadeOut(),
+            ) {
+                if (result != null) {
+                    val context = LocalContext.current
+                    MessageCard(
+                        text = if (result.freedBytes > 0) {
+                            "Freed ${context.formatSize(result.freedBytes)} from ${result.appsCleaned} apps"
+                        } else {
+                            "Caches were already empty — nothing to free"
+                        },
+                        isError = false,
+                        onDismiss = onDismissMessage,
+                    )
+                }
             }
         }
         item { CacheCard(state, onClearAll) }
@@ -95,47 +132,109 @@ fun OverviewScreen(
 @Composable
 private fun CacheCard(state: UiState, onClearAll: () -> Unit) {
     val context = LocalContext.current
+    val reduceMotion = rememberReduceMotion()
+    val total = state.totalCacheBytes
+    val onCard = MaterialTheme.colorScheme.onPrimaryContainer
+
+    // The number on the card counts down after a clean and snaps on any other change.
+    val shown = remember { Animatable(total.toFloat()) }
+    val sweep = remember { Animatable(0f) }
+    LaunchedEffect(total) {
+        if (state.celebrate != null && !reduceMotion) {
+            launch {
+                sweep.snapTo(0f)
+                sweep.animateTo(1f, tween(SWEEP_MS, easing = LinearEasing))
+                sweep.snapTo(0f)
+            }
+            shown.animateTo(total.toFloat(), tween(COUNT_DOWN_MS, easing = EaseOutCubic))
+        } else {
+            shown.snapTo(total.toFloat())
+        }
+    }
+
+    // Gentle pulse on the number while Android clears.
+    val pulse by rememberInfiniteTransition(label = "pulse").animateFloat(
+        initialValue = 1f,
+        targetValue = 0.97f,
+        animationSpec = infiniteRepeatable(tween(500, easing = EaseInOutCubic), RepeatMode.Reverse),
+        label = "pulse",
+    )
+
+    var cardOrigin by remember { mutableStateOf(Offset.Zero) }
+    var numberCenter by remember { mutableStateOf(Offset.Zero) }
+
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(Modifier.padding(20.dp)) {
-            Text(
-                "Total cache",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Text(
-                if (state.apps.isEmpty() && state.scanning) "…" else context.formatSize(state.totalCacheBytes),
-                style = MaterialTheme.typography.displayMedium,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Text(
-                "across ${state.appsWithCache} of ${state.apps.size} apps",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
-            Spacer(Modifier.height(16.dp))
-            Button(
-                onClick = onClearAll,
-                enabled = state.canClear && state.apps.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth().height(52.dp),
-            ) {
-                if (state.clearing) {
-                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Text("Clearing…")
-                } else {
-                    Text("Clear all caches", style = MaterialTheme.typography.titleMedium)
-                }
+        Box(Modifier.onGloballyPositioned { cardOrigin = it.boundsInRoot().topLeft }) {
+            Canvas(Modifier.matchParentSize()) { drawSweep(sweep.value, onCard) }
+            if (!reduceMotion) {
+                SuctionSpecks(
+                    active = state.clearing,
+                    target = numberCenter - cardOrigin,
+                    modifier = Modifier.matchParentSize(),
+                )
             }
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Only cache is removed. Logins, chats, photos, game worlds and other app data stay.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onPrimaryContainer,
-            )
+            Column(Modifier.padding(20.dp)) {
+                Text(
+                    "Total cache",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = onCard,
+                )
+                Text(
+                    if (state.apps.isEmpty() && state.scanning) "…" else context.formatSize(shown.value.toLong()),
+                    style = MaterialTheme.typography.displayMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = onCard,
+                    modifier = Modifier
+                        .onGloballyPositioned {
+                            val r = it.boundsInRoot()
+                            numberCenter = Offset(r.left + r.width * 0.45f, r.top + r.height * 0.55f)
+                        }
+                        .graphicsLayer {
+                            val k = if (state.clearing && !reduceMotion) pulse else 1f
+                            scaleX = k
+                            scaleY = k
+                            transformOrigin = TransformOrigin(0f, 0.5f)
+                        },
+                )
+                Text(
+                    "across ${state.appsWithCache} of ${state.apps.size} apps",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = onCard,
+                )
+                Spacer(Modifier.height(16.dp))
+                val interaction = remember { MutableInteractionSource() }
+                val pressed by interaction.collectIsPressedAsState()
+                val press by animateFloatAsState(if (pressed) 0.96f else 1f, tween(120), label = "press")
+                Button(
+                    onClick = onClearAll,
+                    enabled = state.canClear && state.apps.isNotEmpty() && state.celebrate == null,
+                    interactionSource = interaction,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp)
+                        .graphicsLayer {
+                            scaleX = press
+                            scaleY = press
+                        },
+                ) {
+                    if (state.clearing) {
+                        CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(12.dp))
+                        Text("Clearing…")
+                    } else {
+                        Text("Clear all caches", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Only cache is removed. Logins, chats, photos, game worlds and other app data stay.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = onCard,
+                )
+            }
         }
     }
 }
@@ -148,8 +247,13 @@ private fun StorageCard(state: UiState) {
         Column(Modifier.padding(20.dp)) {
             Text("Phone storage", style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
+            val used by animateFloatAsState(
+                storage.usedBytes.toFloat() / storage.totalBytes.coerceAtLeast(1),
+                tween(900, easing = EaseOutCubic),
+                label = "used",
+            )
             LinearProgressIndicator(
-                progress = { storage.usedBytes.toFloat() / storage.totalBytes.coerceAtLeast(1) },
+                progress = { used },
                 modifier = Modifier.fillMaxWidth().height(8.dp),
             )
             Spacer(Modifier.height(6.dp))
